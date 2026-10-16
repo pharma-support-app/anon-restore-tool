@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>匿名化・復元ツール</title>
+  <style>
+    :root { --bd:#d0d5dd; --accent:#1a73e8; --bg:#f6f8fa; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: #1f2328; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    h2 { font-size: 15px; margin: 0 0 8px; }
+    .card { background: #fff; border: 1px solid var(--bd); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+    textarea { width: 100%; min-height: 160px; padding: 8px; border: 1px solid var(--bd); border-radius: 6px; font: inherit; font-size: 14px; resize: vertical; }
+    textarea.roster { min-height: 120px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    button { padding: 7px 14px; border: 1px solid var(--bd); border-radius: 6px; background: #fff; cursor: pointer; font-size: 14px; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: .5; cursor: default; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+    .msg { font-size: 13px; color: #444; }
+    .warn { color: #b3261e; }
+    .note { font-size: 12px; color: #666; margin-top: 6px; line-height: 1.5; }
+    details summary { cursor: pointer; font-weight: 600; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { font-size: 13px; padding: 3px 10px; border: 1px solid #c5d5f5; border-radius: 999px; background: #eef3fd; }
+  </style>
+</head>
+<body>
+  <h1>匿名化・復元ツール（ブラウザ版）</h1>
+
+  <div class="card">
+    <details id="rosterBox">
+      <summary>名簿の設定(患者・職員)</summary>
+      <div class="grid" style="margin-top:10px">
+        <div>
+          <h2>患者名簿</h2>
+          <textarea id="rosterPatients" class="roster"></textarea>
+        </div>
+        <div>
+          <h2>職員名簿</h2>
+          <textarea id="rosterStaff" class="roster"></textarea>
+        </div>
+      </div>
+      <div class="note">
+        1行に1人。先頭が正式名、2つ目以降は文章中に出てくる別表記(姓のみ・カナなど)をカンマ区切りで入力します。<br>
+        職員は、AIの結果で名前に「様」が付いていた場合、復元時に「さん」へ変換されます(患者は「様」のまま)。<br>
+        データはこの端末のブラウザ（LocalStorage）に保存されます。
+      </div>
+      <div class="row">
+        <button class="primary" id="btnSave">名簿を保存</button>
+        <button id="btnResetDefault">初期名簿に戻す</button>
+        <span class="msg" id="rosterMsg"></span>
+        <span class="msg warn" id="dirtyMark"></span>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>① 元の文章 → 匿名化</h2>
+    <textarea id="original" placeholder="患者名・職員名が入った元の文章を貼り付け"></textarea>
+    <div class="row">
+      <button class="primary" id="btnAnon">匿名化</button>
+      <span class="msg" id="anonMsg"></span>
+    </div>
+    <h2 style="margin-top:12px">匿名化後の文章(これをAIに渡す)</h2>
+    <textarea id="anonymized" readonly></textarea>
+    <div id="tokenBox" style="display:none">
+      <h2 style="margin-top:12px">置換の内訳(送信前の確認用)</h2>
+      <div class="chips" id="tokenChips"></div>
+      <div class="note" id="tokenNote"></div>
+    </div>
+    <div class="row">
+      <button id="btnCopyAnon">コピー</button>
+      <span class="note" style="margin:0">※名簿にない名前や、生年月日・IDなどは置換されません。送信前に目視確認してください。</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>② AIの結果 → 復元</h2>
+    <textarea id="aiResult" placeholder="AIが返した文章を貼り付け(【患者001】などはそのまま)"></textarea>
+    <div class="row">
+      <button class="primary" id="btnRestore">復元</button>
+      <span class="msg" id="restoreMsg"></span>
+    </div>
+    <h2 style="margin-top:12px">復元後の文章(完成)</h2>
+    <textarea id="restored" readonly></textarea>
+    <div class="row">
+      <button id="btnCopyRestored">コピー</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="btnClear">作業内容をクリア</button>
+    <span class="note" style="margin:0">対応表はこのページのメモリ上にのみ保持されます。</span>
+  </div>
+
+  <script>
+    // デフォルトの初期名簿（各10名）
+    var DEFAULT_PATIENTS = 
+      "山田太郎, 山田, ヤマダタロウ\n" +
+      "佐藤花子, 佐藤, サトウハナコ\n" +
+      "鈴木一郎, 鈴木, スズキイチロウ\n" +
+      "高橋美咲, 高橋, タカハシミサキ\n" +
+      "渡辺健一, 渡辺, ワタナベケンイチ\n" +
+      "伊藤由美, 伊藤, イトウユミ\n" +
+      "山本大輔, 山本, ヤマモトダイスケ\n" +
+      "中村恵子, 中村, ナカムラケイコ\n" +
+      "小林誠, 小林, コバヤシマコト\n" +
+      "加藤直美, 加藤, カトウナオミ";
+    
+    var DEFAULT_STAFF = 
+      "田中健太, 田中, タナカケンタ\n" +
+      "清水さくら, 清水, シミズサクラ\n" +
+      "高木勇気, 高木, タカギユウキ\n" +
+      "渡部由香, 渡部, ワタベユカ\n" +
+      "森田修, 森田, モリタオサム\n" +
+      "岡田真由美, 岡田, オカダマユミ\n" +
+      "井上翔太, 井上, イノウエショウタ\n" +
+      "藤本愛, 藤本, フジモトアイ\n" +
+      "長谷川浩, 長谷川, ハセガワヒロシ\n" +
+      "村上朋子, 村上, ムラカミトモコ";
+
+    var LS_KEY_P = 'anon_tool_patients_v1';
+    var LS_KEY_S = 'anon_tool_staff_v1';
+    var MAP_KEY = 'anon_map_v1';
+
+    function saveMapToSession(m) { try { sessionStorage.setItem(MAP_KEY, JSON.stringify(m)); } catch (e) {} }
+    function loadMapFromSession() {
+      try { var v = sessionStorage.getItem(MAP_KEY); return v ? JSON.parse(v) : null; } catch (e) { return null; }
+    }
+    function clearMapFromSession() { try { sessionStorage.removeItem(MAP_KEY); } catch (e) {} }
+    var currentMap = loadMapFromSession();
+
+    function $(id) { return document.getElementById(id); }
+    function setMsg(id, text, isWarn) {
+      var el = $(id); el.textContent = text; el.className = 'msg' + (isWarn ? ' warn' : '');
+    }
+
+    // 初期化・ロード
+    function loadRosters() {
+      var p = localStorage.getItem(LS_KEY_P);
+      var s = localStorage.getItem(LS_KEY_S);
+      if (p === null) { p = DEFAULT_PATIENTS; localStorage.setItem(LS_KEY_P, p); }
+      if (s === null) { s = DEFAULT_STAFF; localStorage.setItem(LS_KEY_S, s); }
+      $('rosterPatients').value = p;
+      $('rosterStaff').value = s;
+      savedRoster = { patients: p, staff: s };
+      updateDirtyMark();
+    }
+
+    var savedRoster = { patients: '', staff: '' };
+    function isRosterDirty() {
+      return $('rosterPatients').value !== savedRoster.patients ||
+             $('rosterStaff').value !== savedRoster.staff;
+    }
+    function updateDirtyMark() {
+      $('dirtyMark').textContent = isRosterDirty() ? '※ 未保存の変更があります' : '';
+    }
+    $('rosterPatients').addEventListener('input', updateDirtyMark);
+    $('rosterStaff').addEventListener('input', updateDirtyMark);
+
+    // 保存
+    $('btnSave').onclick = function () {
+      var p = $('rosterPatients').value;
+      var s = $('rosterStaff').value;
+      localStorage.setItem(LS_KEY_P, p);
+      localStorage.setItem(LS_KEY_S, s);
+      savedRoster = { patients: p, staff: s };
+      updateDirtyMark();
+      var pLen = parseRoster_(p).length;
+      var sLen = parseRoster_(s).length;
+      setMsg('rosterMsg', '保存しました(患者 ' + pLen + '名 / 職員 ' + sLen + '名)');
+    };
+
+    // 初期値に戻す
+    $('btnResetDefault').onclick = function () {
+      if (!confirm('名簿を初期状態に戻しますか？')) return;
+      $('rosterPatients').value = DEFAULT_PATIENTS;
+      $('rosterStaff').value = DEFAULT_STAFF;
+      $('btnSave').click();
+    };
+
+    loadRosters();
+
+    // 名簿パース
+    function parseRoster_(text) {
+      return String(text || '')
+        .split(/\r?\n/)
+        .map(function (line) { return line.split(/[,、，\t]/).map(function (s) { return s.trim(); }).filter(String); })
+        .filter(function (parts) { return parts.length > 0; })
+        .map(function (parts) { return { name: parts[0], aliases: parts.slice(1) }; });
+    }
+
+    function pad3_(n) { return String(n).padStart(3, '0'); }
+    function escapeRegExp_(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+    function normKey_(s) {
+      return String(s).normalize('NFKC').replace(/[\s ]+/g, '');
+    }
+
+    let HALF_TABLE_ = null;
+    function halfTable_() {
+      if (HALF_TABLE_) return HALF_TABLE_;
+      const t = {};
+      for (let cp = 0xFF66; cp <= 0xFF9D; cp++) {
+        const base = String.fromCharCode(cp);
+        [base, base + 'ﾞ', base + 'ﾟ'].forEach(function (h) {
+          const n = h.normalize('NFKC');
+          if (n !== h && n.length === 1 && !t[n]) t[n] = h;
+        });
+      }
+      HALF_TABLE_ = t;
+      return t;
+    }
+
+    function charPattern_(c) {
+      const v = [c];
+      const cp = c.codePointAt(0);
+      if (cp >= 0x21 && cp <= 0x7E) v.push(String.fromCharCode(cp + 0xFEE0));
+      const h = halfTable_()[c];
+      if (h) v.push(h);
+      const esc = v.map(escapeRegExp_);
+      return esc.length === 1 ? esc[0] : '(?:' + esc.join('|') + ')';
+    }
+
+    function aliasPattern_(norm) {
+      return Array.from(norm).map(charPattern_).join('[\\s\\u3000]*');
+    }
+
+    const CATEGORIES = [
+      { propText: function() { return $('rosterPatients').value; }, label: '患者', san: false },
+      { propText: function() { return $('rosterStaff').value; }, label: '職員', san: true }
+    ];
+
+    function buildTables_() {
+      const map = {};
+      const aliasToKey = {};
+      CATEGORIES.forEach(function (c) {
+        parseRoster_(c.propText()).forEach(function (p, i) {
+          const key = c.label + pad3_(i + 1);
+          map[key] = { name: p.name, san: c.san };
+          [p.name].concat(p.aliases).forEach(function (a) {
+            const nk = normKey_(a);
+            if (nk && !aliasToKey.hasOwnProperty(nk)) aliasToKey[nk] = key;
+          });
+        });
+      });
+      return { map: map, aliasToKey: aliasToKey };
+    }
+
+    // ① 匿名化
+    $('btnAnon').onclick = function () {
+      var text = $('original').value;
+      if (!text.trim()) { setMsg('anonMsg', '元の文章を入力してください', true); return; }
+      if (isRosterDirty()) {
+        if (!confirm('名簿に未保存の変更があります。保存してから匿名化しますか？')) return;
+        $('btnSave').click();
+      }
+
+      const t = buildTables_();
+      const norms = Object.keys(t.aliasToKey);
+      const counts = { '患者': 0, '職員': 0 };
+
+      if (norms.length === 0) {
+        setMsg('anonMsg', '名簿に有効な名前が登録されていません', true);
+        return;
+      }
+
+      norms.sort(function (a, b) { return Array.from(b).length - Array.from(a).length; });
+      const re = new RegExp(norms.map(aliasPattern_).join('|'), 'g');
+
+      const used = {};
+      const out = String(text).replace(re, function (m) {
+        const key = t.aliasToKey[normKey_(m)];
+        if (!key) return m;
+        used[key] = (used[key] || 0) + 1;
+        return '【' + key + '】';
+      });
+
+      const usedKeys = Object.keys(used).sort();
+      usedKeys.forEach(function (key) {
+        if (key.indexOf('患者') === 0) counts['患者']++;
+        if (key.indexOf('職員') === 0) counts['職員']++;
+      });
+
+      const entries = usedKeys.map(function (key) {
+        return { token: '【' + key + '】', name: t.map[key].name, count: used[key] };
+      });
+      const unusedCount = Object.keys(t.map).length - entries.length;
+
+      currentMap = t.map;
+      saveMapToSession(t.map);
+      $('anonymized').value = out;
+      $('restored').value = '';
+      renderTokens(entries, unusedCount);
+
+      var total = counts['患者'] + counts['職員'];
+      setMsg('anonMsg', '匿名化しました(患者 ' + counts['患者'] + '名 / 職員 ' + counts['職員'] + '名)', total === 0);
+      if (total === 0) setMsg('anonMsg', '置換された名前がありません。名簿の登録内容を確認してください。', true);
+    };
+
+    function renderTokens(entries, unusedCount) {
+      var chips = $('tokenChips');
+      chips.textContent = '';
+      entries.forEach(function (e) {
+        var s = document.createElement('span');
+        s.className = 'chip';
+        s.textContent = e.token + ' = ' + e.name + '(' + e.count + '箇所)';
+        chips.appendChild(s);
+      });
+      var note = '';
+      if (entries.length === 0) note = '置換された名前はありません。';
+      else if (unusedCount > 0) note = '名簿のうち、この文章に登場しなかった人: ' + unusedCount + '名';
+      $('tokenNote').textContent = note;
+      $('tokenBox').style.display = 'block';
+    }
+
+    // ② 復元
+    $('btnRestore').onclick = function () {
+      var text = $('aiResult').value;
+      if (!text.trim()) { setMsg('restoreMsg', 'AIの結果を入力してください', true); return; }
+      
+      const useMap = (currentMap && Object.keys(currentMap).length > 0) ? currentMap : buildTables_().map;
+      let sanCount = 0;
+
+      const re = new RegExp(
+        '[【\\[\\(（“「]\\s*(患者|職員)\\s*0*(\\d+)\\s*[】\\]\\) C」}]', 'g'
+      );
+      // 簡易版の復元ロジック
+      const reFull = new RegExp(
+        '[【\\[\\(（「]\\s*(患者|職員)\\s*0*(\\d+)\\s*[】\\]\\)）」](\\s*(?:様|さま|サマ|殿))?', 'g'
+      );
+
+      const out = String(text).replace(reFull, function (m, label, num, hon) {
+        const e = useMap[label + pad3_(num)];
+        if (!e) return m;
+        if (hon && e.san) { sanCount++; return e.name + 'さん'; }
+        return e.name + (hon || '');
+      });
+
+      var unrestored = /【(患者|職員)\d+】/.test(out);
+      $('restored').value = out;
+      var msg = '復元しました';
+      if (sanCount > 0) msg += '(職員のキスト「様」→「さん」: ' + sanCount + '件)';
+      if (unrestored) msg = '一部の【患者000】【職員000】形式が復元できていません。内容を確認してください。';
+      setMsg('restoreMsg', msg, unrestored);
+    };
+
+    function copyFrom(id) {
+      var el = $(id); el.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) {}
+      if (!ok && navigator.clipboard) { navigator.clipboard.writeText(el.value); }
+      el.setSelectionRange(0, 0);
+    }
+
+    $('btnCopyAnon').onclick = function () { copyFrom('anonymized'); };
+    $('btnCopyRestored').onclick = function () { copyFrom('restored'); };
+
+    $('btnClear').onclick = function () {
+      if (!confirm('入力・出力の文章と対応表を消去します。よろしいですか?')) return;
+      ['original', 'anonymized', 'aiResult', 'restored'].forEach(function (id) { $(id).value = ''; });
+      currentMap = null;
+      clearMapFromSession();
+      $('tokenChips').textContent = '';
+      $('tokenNote').textContent = '';
+      $('tokenBox').style.display = 'none';
+      ['anonMsg', 'restoreMsg'].format = '';
+      setMsg('anonMsg', '');
+      setMsg('restoreMsg', '');
+    };
+  </script>
+</body>
+</html>
