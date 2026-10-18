@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>匿名化・復元ツール</title>
+  <title>匿名化・復元ツール（ブラウザ版）</title>
   <style>
     :root { --bd:#d0d5dd; --accent:#1a73e8; --bg:#f6f8fa; }
     * { box-sizing: border-box; }
@@ -62,6 +62,7 @@
     <textarea id="original" placeholder="患者名・職員名が入った元の文章を貼り付け"></textarea>
     <div class="row">
       <button class="primary" id="btnAnon">匿名化</button>
+      <label class="msg" style="cursor:pointer"><input type="checkbox" id="chkRule" checked> AIへの指示文を先頭に付ける(推奨)</label>
       <span class="msg" id="anonMsg"></span>
     </div>
     <h2 style="margin-top:12px">匿名化後の文章(これをAIに渡す)</h2>
@@ -93,7 +94,7 @@
 
   <div class="row">
     <button id="btnClear">作業内容をクリア</button>
-    <span class="note" style="margin:0">対応表はこのページのメモリ上にのみ保持されます。</span>
+    <span class="note" style="margin:0">対応表はこのページのメモリ上（またはセッション）にのみ保持されます。</span>
   </div>
 
   <script>
@@ -250,6 +251,31 @@
       return { map: map, aliasToKey: aliasToKey };
     }
 
+    function hasTokenLike_(text) {
+      return /(患者|職員)\s*\d{3}(?!\d)/.test(String(text));
+    }
+
+    // AIへの指示文
+    var RULE_BEGIN = '=== 匿名化ルール(AIへの指示)===';
+    var RULE_END = '=== ルールここまで ===';
+    var RULE_TEXT = RULE_BEGIN + '\n' +
+      '文中の「【患者000】」「【職員000】」のような表記は、匿名化された人名です(000の部分は番号)。\n' +
+      '・【】も含めて、一字一句そのまま出力してください。【】を外したり、番号を書き換えたりしないでください。\n' +
+      '・名前の推測、言い換え、省略はしないでください。\n' +
+      RULE_END;
+    var lastAnonText = '';
+
+    function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+    var RULE_RE = new RegExp(escapeRe(RULE_BEGIN) + '[\\s\\S]*?' + escapeRe(RULE_END) + '\\s*', 'g');
+    function stripRule(s) { return String(s).replace(RULE_RE, ''); }
+
+    function showAnon() {
+      $('anonymized').value = lastAnonText
+        ? ($('chkRule').checked ? RULE_TEXT + '\n\n' : '') + lastAnonText
+        : '';
+    }
+    $('chkRule').onchange = showAnon;
+
     // ① 匿名化
     $('btnAnon').onclick = function () {
       var text = $('original').value;
@@ -292,13 +318,19 @@
 
       currentMap = t.map;
       saveMapToSession(t.map);
-      $('anonymized').value = out;
+      lastAnonText = out;
+      showAnon();
       $('restored').value = '';
       renderTokens(entries, unusedCount);
 
       var total = counts['患者'] + counts['職員'];
+      var tokenLike = hasTokenLike_(text);
       setMsg('anonMsg', '匿名化しました(患者 ' + counts['患者'] + '名 / 職員 ' + counts['職員'] + '名)', total === 0);
       if (total === 0) setMsg('anonMsg', '置換された名前がありません。名簿の登録内容を確認してください。', true);
+      if (tokenLike) {
+        setMsg('anonMsg', $('anonMsg').textContent +
+          ' ※元の文章に「患者001」のような仮名と紛らわしい表記があります。復元時に別の名前へ置き換わる恐れがあるので確認してください。', true);
+      }
     };
 
     function renderTokens(entries, unusedCount) {
@@ -319,31 +351,29 @@
 
     // ② 復元
     $('btnRestore').onclick = function () {
-      var text = $('aiResult').value;
+      var text = stripRule($('aiResult').value);
       if (!text.trim()) { setMsg('restoreMsg', 'AIの結果を入力してください', true); return; }
       
       const useMap = (currentMap && Object.keys(currentMap).length > 0) ? currentMap : buildTables_().map;
       let sanCount = 0;
 
+      // 括弧が外されていても柔軟に拾う正規表現
       const re = new RegExp(
-        '[【\\[\\(（“「]\\s*(患者|職員)\\s*0*(\\d+)\\s*[】\\]\\) C」}]', 'g'
-      );
-      // 簡易版の復元ロジック
-      const reFull = new RegExp(
-        '[【\\[\\(（「]\\s*(患者|職員)\\s*0*(\\d+)\\s*[】\\]\\)）」](\\s*(?:様|さま|サマ|殿))?', 'g'
+        '(?:([【\\[\\(（「])\\s*)?(患者|職員)\\s*(\\d+)(?:\\s*([】\\]\\)）」]))?(?:\\s*(様|さま|サマ|殿))?', 'g'
       );
 
-      const out = String(text).replace(reFull, function (m, label, num, hon) {
-        const e = useMap[label + pad3_(num)];
+      const out = String(text).replace(re, function (m, open, label, digits, close, hon) {
+        if (!open && !close && !/^\d{3}$/.test(digits)) return m; // 括弧なしは3桁のみ(「患者2名」等は対象外)
+        const e = useMap[label + pad3_(Number(digits))];
         if (!e) return m;
         if (hon && e.san) { sanCount++; return e.name + 'さん'; }
         return e.name + (hon || '');
       });
 
-      var unrestored = /【(患者|職員)\d+】/.test(out);
+      var unrestored = /【(患者|職員)\d+】|(患者|職員)\d{3}(?!\d)/.test(out);
       $('restored').value = out;
       var msg = '復元しました';
-      if (sanCount > 0) msg += '(職員のキスト「様」→「さん」: ' + sanCount + '件)';
+      if (sanCount > 0) msg += '(職員の「様」→「さん」: ' + sanCount + '件)';
       if (unrestored) msg = '一部の【患者000】【職員000】形式が復元できていません。内容を確認してください。';
       setMsg('restoreMsg', msg, unrestored);
     };
@@ -364,13 +394,15 @@
       ['original', 'anonymized', 'aiResult', 'restored'].forEach(function (id) { $(id).value = ''; });
       currentMap = null;
       clearMapFromSession();
+      lastAnonText = '';
       $('tokenChips').textContent = '';
       $('tokenNote').textContent = '';
       $('tokenBox').style.display = 'none';
-      ['anonMsg', 'restoreMsg'].format = '';
       setMsg('anonMsg', '');
       setMsg('restoreMsg', '');
     };
+
+    if (currentMap) setMsg('restoreMsg', '前回の匿名化の対応表を引き継いでいます(復元できます)');
   </script>
 </body>
 </html>
